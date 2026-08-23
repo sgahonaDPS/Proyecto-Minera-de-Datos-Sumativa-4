@@ -1,0 +1,341 @@
+---
+title: "Validación Cruzada y Comparación de Configuraciones"
+---
+
+```{r}
+# Minería de datos
+# Validación cruzada y comparación de configuraciones
+```
+
+```{r}
+# Importación de librerías
+library(caret)
+library(randomForest)
+library(cluster)
+library(ggplot2)
+```
+
+```{r}
+# Semilla para reproducibilidad
+set.seed(42)
+```
+
+```{r}
+# Importación del dataset
+df <- read.csv(
+  "weekly_route_operations.csv",
+  sep = ",",
+  header = TRUE
+)
+```
+
+# 1) Regresión - Validación cruzada k-fold (k = 10)
+
+```{r}
+# Configuración A: modelo inicial (9 variables predictoras)
+vars_reg_inicial <- c(
+  "trade_volume_tonnes",
+  "freight_cost_usd",
+  "container_availability_index",
+  "port_congestion_index",
+  "fuel_cost_index",
+  "commodity_price_index",
+  "weather_disruption_score",
+  "geopolitical_risk_score",
+  "carbon_emissions_tonnes"
+)
+
+# Configuración B: modelo final (7 variables, sin multicolinealidad)
+# corresponde al modelo_3 del archivo original de regresión
+vars_reg_final <- c(
+  "trade_volume_tonnes",
+  "freight_cost_usd",
+  "port_congestion_index",
+  "fuel_cost_index",
+  "weather_disruption_score",
+  "geopolitical_risk_score",
+  "carbon_emissions_tonnes"
+)
+```
+
+```{r}
+# Control de validación cruzada: k-fold con k = 10
+ctrl_reg <- trainControl(method = "cv", number = 10)
+```
+
+```{r}
+# Configuración A: entrenamiento con validación cruzada (9 variables)
+modelo_reg_A <- train(
+  reformulate(vars_reg_inicial, response = "shipping_delay_days"),
+  data = df,
+  method = "lm",
+  trControl = ctrl_reg
+)
+
+modelo_reg_A
+```
+
+```{r}
+# Configuración B: entrenamiento con validación cruzada (7 variables)
+modelo_reg_B <- train(
+  reformulate(vars_reg_final, response = "shipping_delay_days"),
+  data = df,
+  method = "lm",
+  trControl = ctrl_reg
+)
+
+modelo_reg_B
+```
+
+```{r}
+# Comparación de resultados entre configuraciones
+resultados_reg <- resamples(list(
+  ConfigA_9vars = modelo_reg_A,
+  ConfigB_7vars = modelo_reg_B
+))
+
+summary(resultados_reg)
+```
+
+```{r}
+# Tabla resumen de la comparación
+tabla_reg <- data.frame(
+  Configuracion = c("A: 9 variables (modelo_inicial)", "B: 7 variables (modelo_3)"),
+  RMSE_promedio = c(mean(modelo_reg_A$resample$RMSE), mean(modelo_reg_B$resample$RMSE)),
+  RMSE_sd       = c(sd(modelo_reg_A$resample$RMSE), sd(modelo_reg_B$resample$RMSE)),
+  R2_promedio   = c(mean(modelo_reg_A$resample$Rsquared), mean(modelo_reg_B$resample$Rsquared))
+)
+
+tabla_reg
+```
+
+```{r}
+# Selección de la configuración óptima
+# Criterio: menor RMSE promedio en la validación cruzada
+mejor_reg <- ifelse(tabla_reg$RMSE_promedio[1] < tabla_reg$RMSE_promedio[2], "A", "B")
+mejor_reg
+```
+
+# 2) Agrupamiento - Validación cruzada por pliegues (k = 5)
+
+```{r}
+# Selección de 6 variables numéricas
+# utilizadas para realizar el agrupamiento
+vars_num <- c(
+  "trade_volume_tonnes",
+  "freight_cost_usd",
+  "container_availability_index",
+  "port_congestion_index",
+  "weather_disruption_score",
+  "carbon_emissions_tonnes"
+)
+
+df_cluster <- df[, vars_num]
+```
+
+```{r}
+# Estandarización de variables
+# Se utiliza debido a que K-means calcula distancias
+# y las variables presentan diferentes escalas.
+df_scaled <- scale(df_cluster)
+```
+
+```{r}
+# División en pliegues para validación cruzada del agrupamiento
+# (adaptación de k-fold para modelos no supervisados,
+# ya que no existe una variable objetivo)
+pliegues <- createFolds(1:nrow(df_scaled), k = 5)
+```
+
+```{r}
+# Función para evaluar un valor de K
+# mediante el coeficiente de silueta promedio entre pliegues
+evaluar_k <- function(k, pliegues, datos_esc) {
+  silueta_pliegues <- c()
+  for (p in pliegues) {
+    muestra  <- datos_esc[p, ]
+    modelo_k <- kmeans(
+      muestra,
+      centers = k,
+      nstart = 25,
+      iter.max = 100,
+      algorithm = "Lloyd"
+    )
+    sil <- silhouette(modelo_k$cluster, dist(muestra))
+    silueta_pliegues <- c(silueta_pliegues, mean(sil[, 3]))
+  }
+  data.frame(K = k, silueta_promedio = mean(silueta_pliegues), silueta_sd = sd(silueta_pliegues))
+}
+```
+
+```{r}
+# Configuración A: K = 3
+resultado_k3 <- evaluar_k(3, pliegues, df_scaled)
+resultado_k3
+```
+
+```{r}
+# Configuración B: K = 4
+resultado_k4 <- evaluar_k(4, pliegues, df_scaled)
+resultado_k4
+```
+
+```{r}
+# Comparación de resultados
+tabla_cluster <- rbind(resultado_k3, resultado_k4)
+tabla_cluster
+```
+
+```{r}
+# Selección de la configuración óptima
+# Criterio: mayor silueta promedio entre pliegues
+mejor_cluster <- ifelse(
+  resultado_k3$silueta_promedio > resultado_k4$silueta_promedio, "K=3", "K=4"
+)
+mejor_cluster
+```
+
+# 3) Clasificación - Validación cruzada k-fold (k = 10)
+
+```{r}
+# Se define route_status como la variable a predecir, se transforma
+# de texto a factor, tal como en el modelo de clasificación original
+df$route_status <- factor(
+  df$route_status,
+  levels = c("Normal", "Delayed", "Disrupted")
+)
+```
+
+```{r}
+# Se excluye shipping_delay_days de las variables predictoras
+# (misma razón que en modelo_clasificacion: fuga de información,
+# ya que route_status se define a partir de esta variable)
+predictores <- c(
+  "trade_volume_tonnes",
+  "container_availability_index",
+  "port_congestion_index",
+  "fuel_cost_index",
+  "commodity_price_index",
+  "weather_disruption_score",
+  "geopolitical_risk_score",
+  "carbon_emissions_tonnes"
+)
+
+df_clas <- df[, c(predictores, "route_status")]
+```
+
+```{r}
+# Control de validación cruzada: k-fold con k = 10
+ctrl_clas <- trainControl(method = "cv", number = 10)
+```
+
+```{r}
+# Configuración A: mtry = 4 (valor utilizado en modelo_rf original)
+modelo_rf_A <- train(
+  route_status ~ .,
+  data = df_clas,
+  method = "rf",
+  trControl = ctrl_clas,
+  tuneGrid = data.frame(mtry = 4),
+  ntree = 300
+)
+
+modelo_rf_A
+```
+
+```{r}
+# Configuración B: mtry = 6
+modelo_rf_B <- train(
+  route_status ~ .,
+  data = df_clas,
+  method = "rf",
+  trControl = ctrl_clas,
+  tuneGrid = data.frame(mtry = 6),
+  ntree = 300
+)
+
+modelo_rf_B
+```
+
+```{r}
+# Comparación de resultados entre configuraciones
+accuracy_valor_A <- mean(modelo_rf_A$resample$Accuracy)
+kappa_valor_A    <- mean(modelo_rf_A$resample$Kappa)
+
+accuracy_valor_B <- mean(modelo_rf_B$resample$Accuracy)
+kappa_valor_B    <- mean(modelo_rf_B$resample$Kappa)
+
+tabla_clas <- data.frame(
+  Configuracion      = c("A: mtry = 4", "B: mtry = 6"),
+  Accuracy_promedio  = c(accuracy_valor_A, accuracy_valor_B),
+  Kappa_promedio     = c(kappa_valor_A, kappa_valor_B)
+)
+
+tabla_clas
+```
+
+```{r}
+# Selección de la configuración óptima
+# Criterio: mayor Accuracy promedio en la validación cruzada
+mejor_clas <- ifelse(accuracy_valor_A > accuracy_valor_B, "A: mtry = 4", "B: mtry = 6")
+mejor_clas
+```
+
+# 4) Tabla resumen final (para informe y presentación)
+
+```{r}
+dir.create("figures", showWarnings = FALSE)
+
+resumen_final <- data.frame(
+  Modelo = c(
+    "Regresion", "Regresion",
+    "Agrupamiento", "Agrupamiento",
+    "Clasificacion", "Clasificacion"
+  ),
+  Configuracion = c(
+    "A: 9 variables", "B: 7 variables",
+    "K = 3", "K = 4",
+    "mtry = 4", "mtry = 6"
+  ),
+  k_CV = c(10, 10, 5, 5, 10, 10),
+  Metrica = c(
+    "RMSE", "RMSE",
+    "Silueta", "Silueta",
+    "Accuracy", "Accuracy"
+  ),
+  Valor_promedio = c(
+    tabla_reg$RMSE_promedio,
+    tabla_cluster$silueta_promedio,
+    tabla_clas$Accuracy_promedio
+  ),
+  Seleccionado = c(
+    mejor_reg == "A", mejor_reg == "B",
+    mejor_cluster == "K=3", mejor_cluster == "K=4",
+    mejor_clas == "A: mtry = 4", mejor_clas == "B: mtry = 6"
+  )
+)
+
+resumen_final
+write.csv(resumen_final, "figures/resumen_validacion_cruzada.csv", row.names = FALSE)
+```
+
+```{r}
+# Gráfico comparativo de configuraciones por modelo
+ggplot(resumen_final, aes(x = Configuracion, y = Valor_promedio, fill = Seleccionado)) +
+  geom_col() +
+  facet_wrap(~ Modelo, scales = "free") +
+  scale_fill_manual(
+    values = c("TRUE" = "lightblue", "FALSE" = "tomato"),
+    labels = c("No seleccionada", "Seleccionada"),
+    name = ""
+  ) +
+  labs(
+    title = "Comparación de configuraciones por modelo (validación cruzada)",
+    x = NULL,
+    y = "Valor promedio de la métrica"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 20, hjust = 1))
+
+ggsave("figures/comparacion_configuraciones_cv.png", width = 9, height = 5, dpi = 130)
+```
