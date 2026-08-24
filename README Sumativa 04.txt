@@ -40,6 +40,8 @@ Para ejecutar correctamente el proyecto se requiere:
   * moments
   * gt
   * randomforest
+  * car
+  * caret
 
 INSTALACIÓN Y CONFIGURACIÓN
 
